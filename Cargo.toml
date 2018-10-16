@@ -1,0 +1,6 @@
+[workspace]
+members = ["cmd/iodin"]
+
+[profile.release]
+lto = true
+opt-level = 3
