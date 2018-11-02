@@ -6,6 +6,8 @@
 #![allow(unknown_lints)]
 #![allow(unreadable_literal)]
 #![allow(const_static_lifetime)]
-// use crate::error::*;
 
-include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+#[cfg(all(target_arch = "arm", target_os = "linux"))]
+include!("./bindings-arm-linux.rs");
+#[cfg(not(all(target_arch = "arm", target_os = "linux")))]
+include!(concat!(env!("OUT_DIR"), "/bindings-gen.rs"));

@@ -7,10 +7,6 @@ build = "build.rs"
 # not ready yet
 publish = false
 
-[profile.release]
-lto = true
-opt-level = 3
-
 [build-dependencies]
 protoc-rust = "^2.1"
 
