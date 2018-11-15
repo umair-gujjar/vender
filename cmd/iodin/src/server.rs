@@ -13,8 +13,10 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(s: UnixDatagram) -> Result<Self> {
-        pigpio::init()?;
+    pub fn new(s: UnixDatagram, mock: bool) -> Result<Self> {
+        if !mock {
+            pigpio::init(pigpio::PI_DISABLE_FIFO_IF | pigpio::PI_DISABLE_SOCK_IF)?;
+        }
         Ok(Server { mdb: None, sock: s })
     }
 
@@ -57,7 +59,7 @@ impl Server {
         }
     }
 
-    fn exec(&mut self, request: &Request, response: &mut Response) -> Result<()> {
+    pub fn exec(&mut self, request: &Request, response: &mut Response) -> Result<()> {
         debug!("exec {:x?}", request);
         match request.command {
             Request_Command::INVALID => {

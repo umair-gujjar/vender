@@ -4,10 +4,10 @@ pub const PI_OUTPUT: u32 = 0;
 pub const PI_WAVE_MODE_ONE_SHOT_SYNC: u32 = 0;
 
 pub unsafe fn gpioCfgInterfaces(_: u32) -> i32 {
-    -1
+    0
 }
 pub unsafe fn gpioInitialise() -> i32 {
-    -1
+    0
 }
 
 pub unsafe fn gpioTick() -> u32 {

@@ -5,8 +5,7 @@ extern crate pigpio_sys;
 #[cfg(target_os = "linux")]
 pub use pigpio_sys::*;
 
-#[cfg(not(target_os = "linux"))]
-mod mock {
+pub mod mock {
     #![allow(non_snake_case)]
     include!("./mock.rs");
 }
@@ -24,8 +23,8 @@ pub fn check(rc: i32) -> io::Result<u32> {
     }
 }
 
-pub fn init() -> io::Result<()> {
-    check(unsafe { gpioCfgInterfaces(PI_DISABLE_FIFO_IF | PI_DISABLE_SOCK_IF) })?;
+pub fn init(flag_interfaces: u32) -> io::Result<()> {
+    check(unsafe { gpioCfgInterfaces(flag_interfaces) })?;
     check(unsafe { gpioInitialise() })?;
     Ok(())
 }

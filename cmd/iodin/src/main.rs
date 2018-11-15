@@ -23,6 +23,24 @@ mod error {
 }
 use self::error::*;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::iodin::*;
+    use std::os::unix::net::UnixDatagram;
+
+    #[test]
+    fn server_exec_zero_invalid_command() {
+        let (_sock1, sock2) = UnixDatagram::pair().unwrap();
+        let mut s = server::Server::new(sock2, true).unwrap();
+        let req = Request::new();
+        let mut resp = Response::new();
+        let r = s.exec(&req, &mut resp);
+        assert!(r.is_err());
+        assert_eq!(r.err().unwrap().to_string(), "invalid command");
+    }
+}
+
 fn main() {
     stderrlog::new()
         .quiet(false)
@@ -54,5 +72,5 @@ fn run() -> Result<()> {
     let sock_fd: RawFd = std::env::var("sock_fd")?.parse::<i32>()?;
     let socket: UnixDatagram = unsafe { UnixDatagram::from_raw_fd(sock_fd) };
     socket.set_write_timeout(Some(Duration::from_millis(15000)))?;
-    server::Server::new(socket)?.run()
+    server::Server::new(socket, false)?.run()
 }
