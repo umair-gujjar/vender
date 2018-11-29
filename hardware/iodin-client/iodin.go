@@ -1,11 +1,7 @@
 package iodin
 
 import (
-	"net"
 	"os"
-	"strconv"
-	"syscall"
-	"time"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/juju/errors"
@@ -15,55 +11,79 @@ import (
 
 type Client struct {
 	proc *os.Process
-	sock *net.UnixConn
+	rf   *os.File
+	wf   *os.File
 }
 
 func NewClient(path string) (*Client, error) {
-	fds, err := syscall.Socketpair(syscall.AF_LOCAL, syscall.SOCK_DGRAM, 0)
+	// one pipe to send data to iodin and one to receive
+	fSendRead, fSendWrite, err := os.Pipe()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-
-	clientFile := os.NewFile(uintptr(fds[1]), "iodin-fd-client")
-	defer clientFile.Close()
-	sockClient, err := net.FileConn(clientFile)
+	fRecvRead, fRecvWrite, err := os.Pipe()
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	sock := sockClient.(*net.UnixConn)
 
 	attr := &os.ProcAttr{
-		Env: []string{"sock_fd=" + strconv.FormatUint(uint64(fds[0]), 10)},
+		Env:   nil,
+		Files: []*os.File{fSendRead, fRecvWrite, os.Stderr},
 	}
 	p, err := os.StartProcess(path, nil, attr)
 	if err != nil {
 		return nil, errors.Trace(err)
 	}
-	return &Client{proc: p, sock: sock}, nil
+
+	c := &Client{
+		proc: p,
+		rf:   fRecvRead,
+		wf:   fSendWrite,
+	}
+	return c, nil
 }
 
 func (self *Client) Do(request *Request, response *Response) error {
-	requestBytes, err := proto.Marshal(request)
-	if err != nil {
-		return errors.Annotatef(err, "iodin.Do.Marshal req=%s", request.String())
+	// sock.SetDeadline(time.Now().Add(5*time.Second))
+	// defer sock.SetDeadline(time.Time{})
+	buf := make([]byte, 256)
+	pb := proto.NewBuffer(buf[:0])
+	{
+		pb.EncodeFixed32(uint64(proto.Size(request)))
+		err := pb.Marshal(request)
+		if err != nil {
+			return errors.Annotatef(err, "iodin.Do.Marshal req=%s", request.String())
+		}
+		_, err = self.wf.Write(pb.Bytes())
+		if err != nil {
+			return errors.Annotatef(err, "iodin.Do.Write req=%s", request.String())
+		}
 	}
 
-	self.sock.SetDeadline(time.Now().Add(time.Second))
-	defer self.sock.SetDeadline(time.Time{})
-	_, err = self.sock.Write(requestBytes)
-	if err != nil {
-		return errors.Annotatef(err, "iodin.Do.Send req=%s", request.String())
+	n, err := self.rf.Read(buf[:4])
+	if err != nil || n < 4 {
+		return errors.Annotatef(err, "iodin.Do.Read len buf=%x n=%d/4 req=%s", buf[:n], n, request.String())
 	}
-	responseBuf := make([]byte, 256)
-	n, err := self.sock.Read(responseBuf)
+	pb.SetBuf(buf[:n])
+	lu64, err := pb.DecodeFixed32()
+	responseLen := int(lu64)
 	if err != nil {
-		return errors.Annotatef(err, "iodin.Do.Recv req=%s", request.String())
+		return errors.Annotatef(err, "iodin.Do.Read len decode buf=%x req=%s", buf[:n], request.String())
 	}
-	responseBytes := responseBuf[:n]
-
-	err = proto.Unmarshal(responseBytes, response)
+	if responseLen > len(buf) {
+		return errors.Errorf("iodin.Do.Read buf overflow %d>%d req=%s", responseLen, len(buf), request.String())
+	}
+	n, err = self.rf.Read(buf[:responseLen])
 	if err != nil {
-		return errors.Annotatef(err, "iodin.Do.Unmarshal req=%s recv=%x", request.String(), responseBytes)
+		return errors.Annotatef(err, "iodin.Do.Read response buf=%x req=%s", buf[:n], request.String())
+	}
+	if n < responseLen {
+		return errors.NotImplementedf("iodin.Do.Read response did not fit in one read() syscall len=%d req=%s", responseLen, request.String())
+	}
+	pb.SetBuf(buf[:n])
+	err = pb.Unmarshal(response)
+	if err != nil {
+		return errors.Annotatef(err, "iodin.Do.Unmarshal buf=%x req=%s", pb.Bytes(), request.String())
 	}
 	return nil
 }

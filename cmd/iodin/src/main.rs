@@ -17,6 +17,7 @@ mod error {
             Fmt(::std::fmt::Error);
             IoError(::std::io::Error);
             NumParse(::std::num::ParseIntError);
+            Protobuf(protobuf::ProtobufError);
             StringUtf8(::std::string::FromUtf8Error);
         }
     }
@@ -65,12 +66,11 @@ fn main() {
 
 /// The actual main(), but with the ability to use ? for easy early return
 fn run() -> Result<()> {
-    use std::os::unix::io::{FromRawFd, RawFd};
-    use std::os::unix::net::UnixDatagram;
-    use std::time::Duration;
+    use std::fs::File;
+    use std::os::unix::io::FromRawFd;
 
-    let sock_fd: RawFd = std::env::var("sock_fd")?.parse::<i32>()?;
-    let socket: UnixDatagram = unsafe { UnixDatagram::from_raw_fd(sock_fd) };
-    socket.set_write_timeout(Some(Duration::from_millis(15000)))?;
-    server::Server::new(socket, false)?.run()
+    let mut stdin = unsafe{File::from_raw_fd(0)};
+    let mut stdout = unsafe{File::from_raw_fd(1)};
+    server::Server::new(false)?.run(&mut stdin, &mut stdout)?;
+    Ok(())
 }
