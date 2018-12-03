@@ -1,7 +1,11 @@
 package iodin
 
 import (
+	"log"
 	"os"
+	"sync/atomic"
+	"syscall"
+	"time"
 
 	"github.com/golang/protobuf/proto"
 	"github.com/juju/errors"
@@ -10,9 +14,10 @@ import (
 //go:generate protoc -I=../../protobuf --go_out=./ ../../protobuf/iodin.proto
 
 type Client struct {
-	proc *os.Process
-	rf   *os.File
-	wf   *os.File
+	proc     *os.Process
+	rf       *os.File
+	wf       *os.File
+	refcount int32
 }
 
 func NewClient(path string) (*Client, error) {
@@ -47,7 +52,46 @@ func (self *Client) Close() error {
 	r := Request{
 		Command: Request_STOP,
 	}
-	return self.Do(&r, new(Response))
+	err := self.Do(&r, new(Response))
+	if err != nil {
+		log.Printf("iodin-client Close() Do(STOP) error=%v", err)
+	}
+	self.rf.Close()
+	self.wf.Close()
+	err = self.proc.Signal(syscall.SIGTERM)
+	if err != nil {
+		log.Printf("iodin-client Close() Signal(SIGTERM) error=%v", err)
+	}
+	done := make(chan error)
+	go func() {
+		_, err := self.proc.Wait()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(5 * time.Second):
+		log.Printf("iodin-client graceful SIGTERM timeout, begin hard kill")
+	}
+	self.proc.Kill()
+	_, err = self.proc.Wait()
+	return err
+}
+
+func (self *Client) IncRef(debug string) {
+	log.Printf("iodin-client incref by %s", debug)
+	atomic.AddInt32(&self.refcount, 1)
+}
+func (self *Client) DecRef(debug string) error {
+	log.Printf("iodin-client decref by %s", debug)
+	new := atomic.AddInt32(&self.refcount, -1)
+	switch {
+	case new > 0:
+		return nil
+	case new == 0:
+		return self.Close()
+	}
+	panic("code error iodin-client decref<0 debug=" + debug)
 }
 
 func (self *Client) Do(request *Request, response *Response) error {
