@@ -3,12 +3,14 @@ package bill
 import (
 	"context"
 	"math/rand"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/temoto/vender/currency"
 	"github.com/temoto/vender/hardware/mdb"
 	"github.com/temoto/vender/hardware/money"
+	"github.com/temoto/vender/head/state"
 	"github.com/temoto/vender/helpers"
 )
 
@@ -37,8 +39,13 @@ func testMake(t testing.TB, replyFunc mdb.TestReplyFunc) *BillValidator {
 			replyFunc(t, reqCh, respCh)
 		}
 	}()
-	bv := &BillValidator{mdb: mdber}
-	err := bv.Init(context.Background(), mdber)
+	bv := &BillValidator{
+		// dev: mdb.Device{Mdber: mdber},
+	}
+	ctx := state.ContextWithConfig(
+		context.Background(),
+		state.MustReadConfig(t.Fatal, strings.NewReader("")))
+	err := bv.Init(ctx, mdber)
 	if err != nil {
 		t.Fatalf("bv.Init err=%v", err)
 	}

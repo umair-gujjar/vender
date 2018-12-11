@@ -6,13 +6,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
-	"sync"
 	"time"
 
 	"github.com/temoto/alive"
 	"github.com/temoto/vender/currency"
 	"github.com/temoto/vender/hardware/mdb"
 	"github.com/temoto/vender/hardware/money"
+	"github.com/temoto/vender/head/state"
 	"github.com/temoto/vender/helpers/msync"
 )
 
@@ -32,9 +32,7 @@ const (
 )
 
 type BillValidator struct {
-	mdb mdb.Mdber
-
-	byteOrder binary.ByteOrder
+	dev mdb.Device
 
 	// Indicates the value of the bill types 0 to 15.
 	// These are final values including all scaling factors.
@@ -47,8 +45,9 @@ type BillValidator struct {
 	escrowCap bool
 
 	internalScalingFactor int
-	batch                 sync.Mutex
 	ready                 msync.Signal
+
+	DoIniter msync.Doer
 }
 
 var (
@@ -69,20 +68,19 @@ var (
 	ErrAttempts         = fmt.Errorf("Attempts")
 )
 
-// usage: defer x.Batch()()
-func (self *BillValidator) Batch() func() {
-	self.batch.Lock()
-	return self.batch.Unlock
-}
-
 func (self *BillValidator) Init(ctx context.Context, mdber mdb.Mdber) error {
 	// TODO read config
-	self.byteOrder = binary.BigEndian
+	self.dev.Address = 0x30
+	self.dev.Name = "billvalidator"
+	self.dev.ByteOrder = binary.BigEndian
+	self.dev.Mdber = mdber
+
+	self.DoIniter = self.newIniter()
+
 	self.billTypeCredit = make([]currency.Nominal, billTypeCount)
-	self.mdb = mdber
 	self.ready = msync.NewSignal()
 	// TODO maybe execute CommandReset?
-	err := self.InitSequence()
+	err := self.DoIniter.Do(ctx)
 	return err
 }
 
@@ -109,64 +107,68 @@ func (self *BillValidator) ReadyChan() <-chan msync.Nothing {
 	return self.ready
 }
 
-func (self *BillValidator) InitSequence() error {
-	defer self.Batch()()
-
-	err := self.CommandSetup()
-	if err != nil {
-		return err
-	}
-	if err = self.CommandExpansionIdentificationOptions(); err != nil {
-		if _, ok := err.(mdb.FeatureNotSupported); ok {
-			if err = self.CommandExpansionIdentification(); err != nil {
-				return err
+func (self *BillValidator) newIniter() msync.Doer {
+	tx := msync.NewTransaction("bill-init")
+	tx.Root.
+		Append(&msync.DoFunc0{F: self.CommandSetup}).
+		Append(&msync.DoFunc0{F: func() error {
+			if err := self.CommandExpansionIdentificationOptions(); err != nil {
+				if _, ok := err.(mdb.FeatureNotSupported); ok {
+					if err = self.CommandExpansionIdentification(); err != nil {
+						return err
+					}
+				} else {
+					return err
+				}
 			}
-		} else {
-			return err
-		}
-	}
-	if err = self.CommandStacker(); err != nil {
-		return err
-	}
+			return nil
+		}}).
+		Append(&msync.DoFunc0{F: self.CommandStacker}).
+		Append(&msync.DoFunc{F: func(ctx context.Context) error {
+			config := state.GetConfig(ctx)
+			// TODO read enabled nominals from config
+			_ = config
+			return self.CommandBillType(0xffff, 0)
+		}})
+	return tx
+}
 
-	// TODO if err
-	// TODO read config
-	// self.CommandBillType(0xffff, 0xffff)
-	if err = self.CommandBillType(0xffff, 0); err != nil {
-		return err
-	}
-	return nil
+func (self *BillValidator) NewRestarter() msync.Doer {
+	tx := msync.NewTransaction("bill-restart")
+	tx.Root.
+		Append(&msync.DoFunc0{F: self.CommandReset}).
+		Append(&msync.DoSleep{100 * time.Millisecond}).
+		Append(self.newIniter())
+	return tx
 }
 
 func (self *BillValidator) CommandReset() error {
-	return self.mdb.Tx(packetReset, new(mdb.Packet))
+	return self.dev.Tx(packetReset).E
 }
 
 func (self *BillValidator) CommandBillType(accept, escrow uint16) error {
 	buf := [5]byte{0x34}
-	self.byteOrder.PutUint16(buf[1:], accept)
-	self.byteOrder.PutUint16(buf[3:], escrow)
+	self.dev.ByteOrder.PutUint16(buf[1:], accept)
+	self.dev.ByteOrder.PutUint16(buf[3:], escrow)
 	request := mdb.PacketFromBytes(buf[:])
-	response := new(mdb.Packet)
-	err := self.mdb.Tx(request, response)
+	err := self.dev.Tx(request).E
 	log.Printf("CommandBillType request=%s err=%v", request.Format(), err)
 	return err
 }
 
 func (self *BillValidator) CommandSetup() error {
 	const expectLength = 27
-	response := new(mdb.Packet)
-	err := self.mdb.Tx(packetSetup, response)
-	if err != nil {
-		log.Printf("mdb request=%s err=%v", packetSetup.Format(), err)
-		return err
+	r := self.dev.Tx(packetSetup)
+	if r.E != nil {
+		log.Printf("mdb request=%s err=%v", packetSetup.Format(), r.E)
+		return r.E
 	}
-	log.Printf("setup response=(%d)%s", response.Len(), response.Format())
-	bs := response.Bytes()
+	log.Printf("setup response=(%d)%s", r.P.Len(), r.P.Format())
+	bs := r.P.Bytes()
 	if len(bs) < expectLength {
-		return fmt.Errorf("bill validator SETUP response=%s expected %d bytes", response.Format(), expectLength)
+		return fmt.Errorf("bill validator SETUP response=%s expected %d bytes", r.P.Format(), expectLength)
 	}
-	scalingFactor := self.byteOrder.Uint16(bs[3:5])
+	scalingFactor := self.dev.ByteOrder.Uint16(bs[3:5])
 	for i, sf := range bs[11:] {
 		n := currency.Nominal(sf) * currency.Nominal(scalingFactor) * currency.Nominal(self.internalScalingFactor)
 		log.Printf("i=%d sf=%d nominal=%s", i, sf, currency.Amount(n).Format100I())
@@ -178,8 +180,8 @@ func (self *BillValidator) CommandSetup() error {
 	log.Printf("Country / Currency Code: %x", bs[1:3])
 	log.Printf("Bill Scaling Factor: %d", scalingFactor)
 	log.Printf("Decimal Places: %d", bs[5])
-	log.Printf("Stacker Capacity: %d", self.byteOrder.Uint16(bs[6:8]))
-	log.Printf("Bill Security Levels: %016b", self.byteOrder.Uint16(bs[8:10]))
+	log.Printf("Stacker Capacity: %d", self.dev.ByteOrder.Uint16(bs[6:8]))
+	log.Printf("Bill Security Levels: %016b", self.dev.ByteOrder.Uint16(bs[8:10]))
 	log.Printf("Escrow/No Escrow: %t", self.escrowCap)
 	log.Printf("Bill Type Credit: %x %#v", bs[11:], self.billTypeCredit)
 	return nil
@@ -187,15 +189,14 @@ func (self *BillValidator) CommandSetup() error {
 
 func (self *BillValidator) CommandPoll() money.PollResult {
 	now := time.Now()
-	response := new(mdb.Packet)
-	err := self.mdb.Tx(packetPoll, response)
+	r := self.dev.Tx(packetPoll)
 	result := money.PollResult{Time: now, Delay: DelayNext}
-	if err != nil {
-		result.Error = err
+	if r.E != nil {
+		result.Error = r.E
 		result.Delay = DelayErr
 		return result
 	}
-	bs := response.Bytes()
+	bs := r.P.Bytes()
 	if len(bs) == 0 {
 		self.ready.Set()
 		return result
@@ -210,29 +211,27 @@ func (self *BillValidator) CommandPoll() money.PollResult {
 
 func (self *BillValidator) CommandStacker() error {
 	request := packetStacker
-	response := new(mdb.Packet)
-	err := self.mdb.Tx(request, response)
+	r := self.dev.Tx(request)
 	// if err != nil {
 	// 	log.Printf("mdb request=%s err=%v", request.Format(), err)
 	// 	return err
 	// }
-	log.Printf("mdb request=%s response=%s err=%v", request.Format(), response.Format(), err)
-	return err
+	log.Printf("mdb request=%s response=%s err=%v", request.Format(), r.P.Format(), r.E)
+	return r.E
 }
 
 func (self *BillValidator) CommandExpansionIdentification() error {
 	const expectLength = 29
 	request := packetExpIdent
-	response := new(mdb.Packet)
-	err := self.mdb.Tx(request, response)
-	if err != nil {
-		log.Printf("mdb request=%s err=%v", request.Format(), err)
-		return err
+	r := self.dev.Tx(request)
+	if r.E != nil {
+		log.Printf("mdb request=%s err=%v", request.Format(), r.E)
+		return r.E
 	}
-	log.Printf("EXPANSION IDENTIFICATION response=(%d)%s", response.Len(), response.Format())
-	bs := response.Bytes()
+	log.Printf("EXPANSION IDENTIFICATION response=(%d)%s", r.P.Len(), r.P.Format())
+	bs := r.P.Bytes()
 	if len(bs) < expectLength {
-		return fmt.Errorf("hardware/mdb/bill EXPANSION IDENTIFICATION response=%s expected %d bytes", response.Format(), expectLength)
+		return fmt.Errorf("hardware/mdb/bill EXPANSION IDENTIFICATION response=%s expected %d bytes", r.P.Format(), expectLength)
 	}
 	log.Printf("Manufacturer Code: %x", bs[0:0+3])
 	log.Printf("Serial Number: '%s'", string(bs[3:3+12]))
@@ -244,9 +243,9 @@ func (self *BillValidator) CommandExpansionIdentification() error {
 func (self *BillValidator) CommandFeatureEnable(requested Features) error {
 	f := requested & self.supportedFeatures
 	buf := [6]byte{0x37, 0x01}
-	self.byteOrder.PutUint32(buf[2:], uint32(f))
+	self.dev.ByteOrder.PutUint32(buf[2:], uint32(f))
 	request := mdb.PacketFromBytes(buf[:])
-	err := self.mdb.Tx(request, new(mdb.Packet))
+	err := self.dev.Tx(request).E
 	if err != nil {
 		log.Printf("mdb request=%s err=%v", request.Format(), err)
 	}
@@ -259,18 +258,17 @@ func (self *BillValidator) CommandExpansionIdentificationOptions() error {
 	}
 	const expectLength = 33
 	request := packetExpIdentOptions
-	response := new(mdb.Packet)
-	err := self.mdb.Tx(request, response)
-	if err != nil {
-		log.Printf("mdb request=%s err=%v", request.Format(), err)
-		return err
+	r := self.dev.Tx(request)
+	if r.E != nil {
+		log.Printf("mdb request=%s err=%v", request.Format(), r.E)
+		return r.E
 	}
-	log.Printf("EXPANSION IDENTIFICATION WITH OPTION BITS response=(%d)%s", response.Len(), response.Format())
-	bs := response.Bytes()
+	log.Printf("EXPANSION IDENTIFICATION WITH OPTION BITS response=(%d)%s", r.P.Len(), r.P.Format())
+	bs := r.P.Bytes()
 	if len(bs) < expectLength {
-		return fmt.Errorf("hardware/mdb/bill EXPANSION IDENTIFICATION WITH OPTION BITS response=%s expected %d bytes", response.Format(), expectLength)
+		return fmt.Errorf("hardware/mdb/bill EXPANSION IDENTIFICATION WITH OPTION BITS response=%s expected %d bytes", r.P.Format(), expectLength)
 	}
-	self.supportedFeatures = Features(self.byteOrder.Uint32(bs[29 : 29+4]))
+	self.supportedFeatures = Features(self.dev.ByteOrder.Uint32(bs[29 : 29+4]))
 	log.Printf("Manufacturer Code: %x", bs[0:0+3])
 	log.Printf("Serial Number: '%s'", string(bs[3:3+12]))
 	log.Printf("Model #/Tuning Revision: '%s'", string(bs[15:15+12]))

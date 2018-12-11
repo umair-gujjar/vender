@@ -60,7 +60,7 @@ func main() {
 
 	config := state.MustReadConfigFile(log.Fatal, *flagConfig)
 	log.Printf("config=%+v", config)
-	ctx = context.WithValue(ctx, "config", config)
+	ctx = state.ContextWithConfig(ctx, config)
 	if err := helpers.FoldErrors(lifecycle.OnValidate.Do(ctx)); err != nil {
 		log.Fatal(errors.ErrorStack(err))
 	}

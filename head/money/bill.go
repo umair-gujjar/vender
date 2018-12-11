@@ -3,7 +3,6 @@ package money
 import (
 	"context"
 	"log"
-	"sync"
 
 	"github.com/temoto/alive"
 	"github.com/temoto/vender/hardware/mdb"
@@ -12,16 +11,12 @@ import (
 )
 
 type BillState struct {
-	lk    sync.Mutex
 	alive *alive.Alive
 	// TODO escrow currency.NominalGroup
 	hw bill.BillValidator
 }
 
 func (self *BillState) Init(ctx context.Context, parent *MoneySystem, m mdb.Mdber) error {
-	self.lk.Lock()
-	defer self.lk.Unlock()
-
 	log.Printf("head/money/bill init")
 	self.alive = alive.NewAlive()
 	pch := make(chan money.PollResult, 2)
@@ -30,7 +25,7 @@ func (self *BillState) Init(ctx context.Context, parent *MoneySystem, m mdb.Mdbe
 	}
 	self.alive.Add(2)
 	go self.hw.Run(ctx, self.alive, pch)
-	go self.pollResultLoop(parent, pch)
+	go self.pollResultLoop(ctx, parent, pch)
 	return nil
 }
 
@@ -39,11 +34,11 @@ func (self *BillState) Stop(ctx context.Context) {
 	self.alive.Wait()
 }
 
-func (self *BillState) pollResultLoop(m *MoneySystem, pch <-chan money.PollResult) {
+func (self *BillState) pollResultLoop(ctx context.Context, m *MoneySystem, pch <-chan money.PollResult) {
 	defer self.alive.Done()
 
 	const logPrefix = "head/money/bill"
-	h := func(m *MoneySystem, pr *money.PollResult, pi money.PollItem, hw Hardwarer) bool {
+	h := func(m *MoneySystem, pr *money.PollResult, pi money.PollItem) bool {
 		switch pi.Status {
 		case money.StatusRejected:
 		case money.StatusDisabled:
@@ -51,17 +46,12 @@ func (self *BillState) pollResultLoop(m *MoneySystem, pch <-chan money.PollResul
 		case money.StatusEscrow:
 			// TODO self.hw.EscrowAccept / Reject
 		case money.StatusWasReset:
-			self.hw.InitSequence()
+			self.hw.DoIniter.Do(ctx)
 		case money.StatusBusy:
 		default:
 			return false
 		}
 		return true
 	}
-	onRestart := func(m *MoneySystem, hw Hardwarer) {
-		self.hw.CommandReset()
-		// InitSequence will be executed as reaction to StatusWasReset
-		// self.hw.InitSequence()
-	}
-	pollResultLoop(m, pch, h, onRestart, &self.hw, logPrefix)
+	pollResultLoop(ctx, m, pch, h, self.hw.NewRestarter(), logPrefix)
 }
