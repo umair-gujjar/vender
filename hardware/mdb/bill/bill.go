@@ -8,6 +8,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/juju/errors"
 	"github.com/temoto/alive"
 	"github.com/temoto/vender/currency"
 	"github.com/temoto/vender/hardware/mdb"
@@ -17,7 +18,7 @@ import (
 )
 
 const (
-	billTypeCount = 16
+	TypeCount = 16
 
 	DelayErr  = 500 * time.Millisecond
 	DelayNext = 200 * time.Millisecond
@@ -34,20 +35,22 @@ const (
 type BillValidator struct {
 	dev mdb.Device
 
-	// Indicates the value of the bill types 0 to 15.
-	// These are final values including all scaling factors.
-	billTypeCredit []currency.Nominal
-
 	featureLevel      uint8
 	supportedFeatures Features
-
 	// Escrow capability.
 	escrowCap bool
 
-	internalScalingFactor int
-	ready                 msync.Signal
+	scalingFactor uint16
+	billFactors   [TypeCount]uint8
+	billNominals  [TypeCount]currency.Nominal
 
-	DoIniter msync.Doer
+	stackerFull  bool
+	stackerCount uint
+
+	ready msync.Signal
+
+	DoIniter      msync.Doer
+	DoConfigBills msync.Doer
 }
 
 var (
@@ -68,6 +71,35 @@ var (
 	ErrAttempts         = fmt.Errorf("Attempts")
 )
 
+type CommandStacker struct {
+	Dev   *mdb.Device
+	done  bool
+	full  bool
+	count uint16
+}
+
+func (self *CommandStacker) Do(ctx context.Context) error {
+	request := packetStacker
+	r := self.Dev.Tx(request)
+	if r.E != nil {
+		log.Printf("mdb request=%s err=%v", request.Format(), r.E)
+		return r.E
+	}
+	rb := r.P.Bytes()
+	if len(rb) != 2 {
+		return errors.Errorf("STACKER response length=%d expected=2", len(rb))
+	}
+	x := self.Dev.ByteOrder.Uint16(rb)
+	self.full = (x & 0x8000) != 0
+	self.count = x & 0x7fff
+	self.done = true
+	log.Printf(self.String())
+	return nil
+}
+func (self *CommandStacker) String() string {
+	return fmt.Sprintf("STACKER done=%t full=%t count=%d", self.done, self.full, self.count)
+}
+
 func (self *BillValidator) Init(ctx context.Context, mdber mdb.Mdber) error {
 	// TODO read config
 	self.dev.Address = 0x30
@@ -75,9 +107,10 @@ func (self *BillValidator) Init(ctx context.Context, mdber mdb.Mdber) error {
 	self.dev.ByteOrder = binary.BigEndian
 	self.dev.Mdber = mdber
 
+	// warning: hidden dependencies in order of following calls
+	self.DoConfigBills = self.newConfigBills()
 	self.DoIniter = self.newIniter()
 
-	self.billTypeCredit = make([]currency.Nominal, billTypeCount)
 	self.ready = msync.NewSignal()
 	// TODO maybe execute CommandReset?
 	err := self.DoIniter.Do(ctx)
@@ -86,17 +119,21 @@ func (self *BillValidator) Init(ctx context.Context, mdber mdb.Mdber) error {
 
 func (self *BillValidator) Run(ctx context.Context, a *alive.Alive, ch chan<- money.PollResult) {
 	defer a.Done()
+	cmd := &CommandPoll{bv: self}
+	defer func() { cmd.bv = nil; cmd = nil }() // help GC, redundant?
 
 	stopch := a.StopChan()
 	for a.IsRunning() {
-		pr := self.CommandPoll()
+		if err := cmd.Do(ctx); err != nil {
+			log.Printf("billvalidator/Run/POLL err=%v", err)
+		}
 		select {
-		case ch <- pr:
+		case ch <- cmd.R:
 		case <-stopch:
 			return
 		}
 		select {
-		case <-time.After(pr.Delay):
+		case <-time.After(cmd.R.Delay):
 		case <-stopch:
 			return
 		}
@@ -108,7 +145,7 @@ func (self *BillValidator) ReadyChan() <-chan msync.Nothing {
 }
 
 func (self *BillValidator) newIniter() msync.Doer {
-	tx := msync.NewTransaction("bill-init")
+	tx := msync.NewTransaction(self.dev.Name + "-init")
 	tx.Root.
 		Append(&msync.DoFunc0{F: self.CommandSetup}).
 		Append(&msync.DoFunc0{F: func() error {
@@ -123,21 +160,28 @@ func (self *BillValidator) newIniter() msync.Doer {
 			}
 			return nil
 		}}).
-		Append(&msync.DoFunc0{F: self.CommandStacker}).
-		Append(&msync.DoFunc{F: func(ctx context.Context) error {
+		Append(&CommandStacker{Dev: &self.dev}).
+		Append(self.DoConfigBills)
+	return tx
+}
+
+func (self *BillValidator) newConfigBills() msync.Doer {
+	return &msync.DoFunc{
+		Name: "enable-bills-config",
+		F: func(ctx context.Context) error {
 			config := state.GetConfig(ctx)
 			// TODO read enabled nominals from config
 			_ = config
 			return self.CommandBillType(0xffff, 0)
-		}})
-	return tx
+		},
+	}
 }
 
 func (self *BillValidator) NewRestarter() msync.Doer {
-	tx := msync.NewTransaction("bill-restart")
+	tx := msync.NewTransaction(self.dev.Name + "-restart")
 	tx.Root.
 		Append(&msync.DoFunc0{F: self.CommandReset}).
-		Append(&msync.DoSleep{100 * time.Millisecond}).
+		Append(&msync.DoSleep{200 * time.Millisecond}).
 		Append(self.newIniter())
 	return tx
 }
@@ -168,56 +212,61 @@ func (self *BillValidator) CommandSetup() error {
 	if len(bs) < expectLength {
 		return fmt.Errorf("bill validator SETUP response=%s expected %d bytes", r.P.Format(), expectLength)
 	}
-	scalingFactor := self.dev.ByteOrder.Uint16(bs[3:5])
-	for i, sf := range bs[11:] {
-		n := currency.Nominal(sf) * currency.Nominal(scalingFactor) * currency.Nominal(self.internalScalingFactor)
-		log.Printf("i=%d sf=%d nominal=%s", i, sf, currency.Amount(n).Format100I())
-		self.billTypeCredit[i] = n
-	}
-	self.escrowCap = bs[10] == 0xff
+
 	self.featureLevel = bs[0]
+	currencyCode := bs[1:3]
+	self.scalingFactor = self.dev.ByteOrder.Uint16(bs[3:5])
+	stackerCap := self.dev.ByteOrder.Uint16(bs[6:8])
+	billSecurityLevels := self.dev.ByteOrder.Uint16(bs[8:10])
+	self.escrowCap = bs[10] == 0xff
+
+	log.Printf("Bill Type Scaling Factors: %3v", bs[11:])
+	for i, sf := range bs[11:] {
+		if i >= TypeCount {
+			log.Printf("ERROR bill SETUP type factors count=%d more than expected=%d", len(bs[11:]), TypeCount)
+			break
+		}
+		self.billFactors[i] = sf
+		self.billNominals[i] = currency.Nominal(sf) * currency.Nominal(self.scalingFactor)
+	}
+	log.Printf("Bill Type calc. nominals:  %3v", self.billNominals)
+
 	log.Printf("Bill Validator Feature Level: %d", self.featureLevel)
-	log.Printf("Country / Currency Code: %x", bs[1:3])
-	log.Printf("Bill Scaling Factor: %d", scalingFactor)
+	log.Printf("Country / Currency Code: %x", currencyCode)
+	log.Printf("Bill Scaling Factor: %d", self.scalingFactor)
 	log.Printf("Decimal Places: %d", bs[5])
-	log.Printf("Stacker Capacity: %d", self.dev.ByteOrder.Uint16(bs[6:8]))
-	log.Printf("Bill Security Levels: %016b", self.dev.ByteOrder.Uint16(bs[8:10]))
+	log.Printf("Stacker Capacity: %d", stackerCap)
+	log.Printf("Bill Security Levels: %016b", billSecurityLevels)
 	log.Printf("Escrow/No Escrow: %t", self.escrowCap)
-	log.Printf("Bill Type Credit: %x %#v", bs[11:], self.billTypeCredit)
+	log.Printf("Bill Type Credit: %x %#v", bs[11:], self.billNominals)
 	return nil
 }
 
-func (self *BillValidator) CommandPoll() money.PollResult {
+type CommandPoll struct {
+	bv *BillValidator
+	R  money.PollResult
+}
+
+func (self *CommandPoll) Do(ctx context.Context) error {
 	now := time.Now()
-	r := self.dev.Tx(packetPoll)
-	result := money.PollResult{Time: now, Delay: DelayNext}
+	r := self.bv.dev.Tx(packetPoll)
+	self.R = money.PollResult{Time: now, Delay: DelayNext}
 	if r.E != nil {
-		result.Error = r.E
-		result.Delay = DelayErr
-		return result
+		self.R.Error = r.E
+		self.R.Delay = DelayErr
+		return r.E
 	}
 	bs := r.P.Bytes()
 	if len(bs) == 0 {
-		self.ready.Set()
-		return result
+		// FIXME self.ready.Set()
+		return nil
 	}
-	result.Items = make([]money.PollItem, len(bs))
+	self.R.Items = make([]money.PollItem, len(bs))
 	// log.Printf("poll response=%s", response.Format())
 	for i, b := range bs {
-		result.Items[i] = self.parsePollItem(b)
+		self.R.Items[i] = self.bv.parsePollItem(b)
 	}
-	return result
-}
-
-func (self *BillValidator) CommandStacker() error {
-	request := packetStacker
-	r := self.dev.Tx(request)
-	// if err != nil {
-	// 	log.Printf("mdb request=%s err=%v", request.Format(), err)
-	// 	return err
-	// }
-	log.Printf("mdb request=%s response=%s err=%v", request.Format(), r.P.Format(), r.E)
-	return r.E
+	return nil
 }
 
 func (self *BillValidator) CommandExpansionIdentification() error {
@@ -277,12 +326,12 @@ func (self *BillValidator) CommandExpansionIdentificationOptions() error {
 	return nil
 }
 
-func (self *BillValidator) billTypeNominal(b byte) currency.Nominal {
-	if b >= billTypeCount {
+func (self *BillValidator) billNominal(b byte) currency.Nominal {
+	if b >= TypeCount {
 		log.Printf("invalid bill type: %d", b)
 		return 0
 	}
-	return self.billTypeCredit[b]
+	return self.billNominals[b]
 }
 
 func (self *BillValidator) parsePollItem(b byte) money.PollItem {
@@ -314,11 +363,11 @@ func (self *BillValidator) parsePollItem(b byte) money.PollItem {
 	}
 
 	if b&0x8f == b { // Bill Stacked
-		amount := self.billTypeNominal(b & 0xf)
+		amount := self.billNominal(b & 0xf)
 		return money.PollItem{Status: money.StatusCredit, DataNominal: amount}
 	}
 	if b&0x9f == b { // Escrow Position
-		amount := self.billTypeNominal(b & 0xf)
+		amount := self.billNominal(b & 0xf)
 		log.Printf("bill escrow TODO packetEscrowAccept")
 		return money.PollItem{Status: money.StatusEscrow, DataNominal: amount}
 	}
