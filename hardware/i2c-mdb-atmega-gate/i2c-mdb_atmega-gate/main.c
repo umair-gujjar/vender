@@ -30,6 +30,7 @@ bool watchdog_expect __attribute__((section(".noinit,\"aw\",@nobits;")));
 void early_init(void) __attribute__((naked, used, section(".init3")));
 void early_init(void) {
   wdt_disable();
+  cli();
   mcusr_saved = MCUSR;
   MCUSR = 0;
   if (bit_mask_test(mcusr_saved, _BV(WDRF)) && watchdog_expect) {
@@ -48,7 +49,6 @@ static void soft_reset(void) {
 }
 
 int main(void) {
-  cli();
   wdt_enable(WDTO_30MS);
   wdt_reset();
   timer0_stop();
@@ -68,15 +68,17 @@ int main(void) {
     wdt_reset();
     bool again = false;
     if (twi_idle) {
-      again |= twi_step();  // may take 130us on FCPU=16MHz
+      again |= twi_step();  // may take 130us on F_CPU=16MHz
+      cli();
+      master_notify_set((twi_out.used < twi_out.length) ||
+                        (master_out.length > 0));
+      sei();
     }
     if (mdb_state != MDB_State_Idle) {
       // cli(); // TODO double check if mdb_step() is safe with interrupts
       again |= mdb_step();
       // sei();
     }
-    master_notify_set((!twi_idle) || (twi_out.used < twi_out.length) ||
-                      (master_out.length > 0));
     if (!again) {
       // TODO measure idle time
       _delay_us(300);
@@ -109,10 +111,14 @@ static uint8_t master_command(uint8_t const *const bs,
   uint8_t const data_length = length - 3;
   uint8_t const *const data = bs + 2;
   if (header == Command_Poll) {
-    if (length != 3) {
-      master_out_2(Response_Bad_Packet, 1);
+    if (data_length != 0) {
+      master_out_2(Response_Bad_Packet, 0);
       return length;
     }
+    uint8_t const buf[] = {
+        'M', 1, mdb_state, 'Q', 2, twi_out.length, master_out.length,
+    };
+    master_out_n(Response_Status, buf, sizeof(buf));
   } else if (header == Command_Config) {
     mcusr_saved = 0;
     // TODO
@@ -142,7 +148,7 @@ static uint8_t master_command(uint8_t const *const bs,
     master_out_1(Response_Not_Implemented);
   } else if (header == Command_MDB_Bus_Reset) {
     if (data_length != 2) {
-      master_out_1(Response_Bad_Packet);
+      master_out_2(Response_Bad_Packet, 0);
       return length;
     }
     if (mdb_state != MDB_State_Idle) {
@@ -157,13 +163,15 @@ static uint8_t master_command(uint8_t const *const bs,
     timer0_set((uint8_t)duration);
     master_out_1(Response_MDB_Started);
   } else if (header == Command_MDB_Transaction_Simple) {
+    if (data_length + 1 > mdb_out.size) {
+      master_out_1(Response_Buffer_Overflow);
+      return length;
+    }
     if (mdb_state != MDB_State_Idle) {
       master_out_1(Response_MDB_Busy);
       return length;
     }
-    // TODO Buffer_Clear_Fast(&mdb_out)  after thorough testing
-    Buffer_Clear_Full(&mdb_out);
-    Buffer_AppendN(&mdb_out, data, data_length);
+    Buffer_Copy(&mdb_out, data, data_length);
     Buffer_Append(&mdb_out, memsum(data, data_length));
     mdb_start_send();
     master_out_1(Response_MDB_Started);

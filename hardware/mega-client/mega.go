@@ -3,6 +3,7 @@ package mega
 import (
 	"fmt"
 	"log"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -11,33 +12,35 @@ import (
 	"github.com/temoto/alive"
 	"github.com/temoto/vender/crc"
 	"github.com/temoto/vender/hardware/i2c"
+	"github.com/temoto/vender/helpers/msync"
 )
 
 const modName string = "mega-client"
 
 type Client struct {
-	bus  i2c.I2CBus
-	addr byte
-	// pinWatch *gpio.Watcher
-	pin      uint
-	refcount int32
-	alive    *alive.Alive
-	out      chan Tx
-	in       chan []byte
+	bus       i2c.I2CBus
+	addr      byte
+	pin       uint
+	twiCh     chan Packet
+	respCh    chan Packet
+	strayCh   chan Packet
+	refcount  int32
+	alive     *alive.Alive
+	serialize sync.Mutex
 }
 
 func NewClient(busNo byte, addr byte, pin uint) (*Client, error) {
-	c := &Client{
-		addr: addr,
-		bus:  i2c.NewI2CBus(busNo),
-		// pinWatch: gpio.NewWatcher(),
-		pin:   pin,
-		alive: alive.NewAlive(),
-		out:   make(chan Tx),
-		in:    make(chan []byte),
+	self := &Client{
+		addr:    addr,
+		bus:     i2c.NewI2CBus(busNo),
+		pin:     pin,
+		alive:   alive.NewAlive(),
+		respCh:  make(chan Packet, 16),
+		strayCh: make(chan Packet, 16),
+		twiCh:   make(chan Packet, 16),
 	}
-	go c.run()
-	return c, nil
+	go self.reader()
+	return self, nil
 }
 
 func (self *Client) Close() error {
@@ -80,82 +83,73 @@ func (self *Client) RawWrite(b []byte) error {
 	return err
 }
 
+// TODO FIXME WIP
+func (self *Client) DoPoll() error {
+	return self.Do(&Tx{Rq: []byte{byte(Command_Poll)}})
+}
+
 type Tx struct {
 	Rq []byte
 	Rs []byte
 	Ps []Packet
 	E  error
+	w  msync.Signal
 }
 
-func (self *Client) Do(t *Tx) error {
-	plen := len(t.Rq) + 2
-	packet := make([]byte, plen)
-	packet[0] = byte(plen)
-	copy(packet[1:], t.Rq)
-	packet[plen-1] = crc.CRC8_p93_n(0, packet[:plen-1])
-	log.Printf("%s Do packet=%02x", modName, packet)
+func (self *Client) Do(tx *Tx) error {
+	self.serialize.Lock()
+	defer self.serialize.Unlock()
 
-	t.E = self.RawWrite(packet)
-	if t.E != nil {
-		return t.E
-	}
-	// FIXME wait pin edge
-	time.Sleep(100 * time.Millisecond)
-	t.Rs = make([]byte, RESPONSE_MAX_LENGTH+1)
-	t.E = self.RawRead(t.Rs)
-	if t.E != nil {
-		return t.E
-	}
+	bufOut := make([]byte, COMMAND_MAX_LENGTH)
+	plen := len(tx.Rq) + 2
+	bufOut[0] = byte(plen)
+	copy(bufOut[1:], tx.Rq)
+	bufOut[plen-1] = crc.CRC8_p93_n(0, bufOut[:plen-1])
+	_ = self.RawWrite(bufOut[:plen])
 
-	guessPacketCount := 0
-	if len(t.Rs) > 0 {
-		guessPacketCount = int(t.Rs[0]) / 5
+	select {
+	case p := <-self.respCh:
+		tx.Ps = append(tx.Ps, p)
+		log.Printf("Do response %s", p.String())
+	case <-time.After(500 * time.Millisecond):
+		return errors.Timeoutf("omg")
 	}
-	t.Ps = make([]Packet, 0, guessPacketCount)
-	t.E = ParseResponse(t.Rs, func(p Packet) {
-		t.Ps = append(t.Ps, p)
-	})
-	return t.E
+	return nil
 }
 
-func (self *Client) run() {
+func (self *Client) reader() {
+	stopch := self.alive.StopChan()
+	bufIn := make([]byte, RESPONSE_MAX_LENGTH)
+
 	pinWatch := gpio.NewWatcher()
 	pinWatch.AddPinWithEdgeAndLogic(self.pin, gpio.EdgeRising, gpio.ActiveHigh)
 	defer pinWatch.Close()
 
-	stopch := self.alive.StopChan()
-	// TODO listen gpio pin
-	// backup := time.NewTicker(740 * time.Millisecond)
-	// backup.Stop()
-	buf := make([]byte, RESPONSE_MAX_LENGTH+1)
 	for self.alive.IsRunning() {
 		select {
-		case tx := <-self.out:
-			_ = self.RawWrite(tx.Rq)
-
 		case <-pinWatch.Notification:
-			err := self.RawRead(buf)
+			log.Printf("pin edge")
+			err := self.RawRead(bufIn)
 			if err != nil {
 				log.Printf("%s pin read=%02x error=%v", modName, self.addr, err)
 				break
 			}
-			// FIXME duplicate code
-			err = ParseResponse(buf, func(p Packet) {
-				log.Printf("- packet=%s %s", p.Hex(), p.String())
+			err = ParseResponse(bufIn, func(p Packet) {
+				log.Printf("- debug packet=%s %s", p.Hex(), p.String())
+				switch p.Header {
+				case Response_TWI:
+					self.twiCh <- p
+				case Response_UART_Read_Unexpected:
+					self.strayCh <- p
+				default:
+					self.respCh <- p
+				}
 			})
 			if err != nil {
-				log.Printf("pin read=%02x parse error=%v", buf, err)
+				log.Printf("pin read=%02x parse error=%v", bufIn, err)
 				break
 			}
 
-		// case <-backup.C:
-		// 	// TODO expect empty, otherwise log "gpio fail"
-		// 	err := self.RawRead(buf)
-		// 	if err != nil {
-		// 		log.Printf("%s backup read=%02x error=%v", modName, self.addr, err)
-		// 		break
-		// 	}
-		// 	log.Printf("%s backup read buf=%02x", modName, buf)
 		case <-stopch:
 			return
 		}

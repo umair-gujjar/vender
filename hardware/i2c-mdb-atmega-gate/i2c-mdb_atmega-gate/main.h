@@ -24,7 +24,6 @@ MDB_State_t const MDB_State_Recv = 3;
 MDB_State_t const MDB_State_Recv_End = 4;
 MDB_State_t const MDB_State_Bus_Reset = 5;
 
-// master command
 #define COMMAND_MAX_LENGTH 93
 typedef uint8_t Command_t;
 Command_t const Command_Poll = 0x01;
@@ -38,31 +37,31 @@ Command_t const Command_MDB_Transaction_Custom = 0x09;
 
 #define RESPONSE_MAX_LENGTH 80
 typedef uint8_t Response_t;
-// slave ok
+#define Response_Mask_Error 0x80
 Response_t const Response_BeeBee[3] = {0xbe, 0xeb, 0xee};
 Response_t const Response_Status = 0x01;
 Response_t const Response_Debug = 0x04;
 Response_t const Response_TWI = 0x05;
 Response_t const Response_MDB_Started = 0x08;
 Response_t const Response_MDB_Success = 0x09;
-// slave error
-Response_t const Response_Error = 0x80;
-Response_t const Response_Bad_Packet = 0x81;
-Response_t const Response_Invalid_CRC = 0x82;
-Response_t const Response_Buffer_Overflow = 0x83;
-Response_t const Response_Unknown_Command = 0x84;
-Response_t const Response_Corruption = 0x85;
-Response_t const Response_Not_Implemented = 0x86;
-Response_t const Response_MDB_Busy = 0x88;
-Response_t const Response_MDB_Invalid_CHK = 0x89;
-Response_t const Response_MDB_NAK = 0x8a;
-Response_t const Response_MDB_Timeout = 0x8b;
-Response_t const Response_MDB_Invalid_End = 0x8c;
-Response_t const Response_MDB_Receive_Overflow = 0x8d;
-Response_t const Response_MDB_Send_Overflow = 0x8e;
-Response_t const Response_UART_Read_Unexpected = 0x90;
-Response_t const Response_UART_Read_Error = 0x91;
-Response_t const Response_UART_Send_Busy = 0x92;
+Response_t const Response_Bad_Packet = 0x1 + Response_Mask_Error;
+Response_t const Response_Invalid_CRC = 0x2 + Response_Mask_Error;
+Response_t const Response_Buffer_Overflow = 0x3 + Response_Mask_Error;
+Response_t const Response_Unknown_Command = 0x4 + Response_Mask_Error;
+Response_t const Response_Not_Implemented = 0x5 + Response_Mask_Error;
+Response_t const Response_MDB_Busy = 0x8 + Response_Mask_Error;
+Response_t const Response_MDB_Invalid_CHK = 0x9 + Response_Mask_Error;
+Response_t const Response_MDB_NAK = 0xa + Response_Mask_Error;
+Response_t const Response_MDB_Timeout = 0xb + Response_Mask_Error;
+Response_t const Response_MDB_Invalid_End = 0xc + Response_Mask_Error;
+Response_t const Response_MDB_Receive_Overflow = 0xd + Response_Mask_Error;
+Response_t const Response_MDB_Send_Overflow = 0xe + Response_Mask_Error;
+Response_t const Response_MDB_Code_Error = 0xf + Response_Mask_Error;
+Response_t const Response_UART_Read_Unexpected = 0x10 + Response_Mask_Error;
+Response_t const Response_UART_Read_Error = 0x11 + Response_Mask_Error;
+Response_t const Response_UART_Read_Overflow = 0x12 + Response_Mask_Error;
+Response_t const Response_UART_Read_Parity = 0x13 + Response_Mask_Error;
+Response_t const Response_UART_Send_Busy = 0x14 + Response_Mask_Error;
 
 static bool uart_send_ready(void);
 static void mdb_init(void);

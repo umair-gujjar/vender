@@ -98,13 +98,21 @@ static void master_out_1(Response_t const header) {
 }
 
 static void master_out_2(Response_t const header, uint8_t const data) {
-  uint8_t const packet_length = 4;
+  uint8_t const packet_length = 3 + 1;
   uint8_t const crc = crc8_p93_3b(packet_length, header, data);
   uint8_t const packet[] = {packet_length, header, data, crc};
   if (!Buffer_AppendN(&master_out, packet, packet_length)) {
     twi_out_set_2(Response_Buffer_Overflow, packet_length);
   }
 }
+// static void master_out_3(Response_t const header, uint8_t const data) {
+//   uint8_t const packet_length = 3 + 2;
+//   uint8_t const crc = crc8_p93_3b(packet_length, header, data);
+//   uint8_t const packet[] = {packet_length, header, data, crc};
+//   if (!Buffer_AppendN(&master_out, packet, packet_length)) {
+//     twi_out_set_2(Response_Buffer_Overflow, packet_length);
+//   }
+// }
 
 static void master_out_n(Response_t const header, uint8_t const *const data,
                          uint8_t const data_length) {

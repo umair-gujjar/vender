@@ -52,7 +52,7 @@ func (self *Packet) Parse(b []byte) error {
 }
 
 func (self *Packet) Error() string {
-	if self.Header&0x80 == 0 {
+	if self.Header&Response_Mask_Error == 0 {
 		return ""
 	}
 	return fmt.Sprintf("%s(%02x)", self.Header.String(), self.Data)

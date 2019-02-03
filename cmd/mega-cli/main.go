@@ -82,14 +82,7 @@ func main() {
 					tx := &mega.Tx{Rq: bs}
 					err = client.Do(tx)
 					if err != nil {
-						log.Printf("tx rq=%02x rs=%02x error=%v", tx.Rq, tx.Rs, err)
-						break
-					}
-					err = mega.ParseResponse(tx.Rs, func(p mega.Packet) {
-						log.Printf("- packet=%s %s", p.Hex(), p.String())
-					})
-					if err != nil {
-						log.Printf("tx rq=%02x rs=%02x parse error=%v", tx.Rq, tx.Rs, err)
+						log.Printf("p rq=%02x rs=%02x error=%v", tx.Rq, tx.Rs, err)
 						break
 					}
 				}

@@ -8,17 +8,15 @@ const (
 	_Response_t_name_0 = "Status"
 	_Response_t_name_1 = "DebugTWI"
 	_Response_t_name_2 = "MDB_StartedMDB_Success"
-	_Response_t_name_3 = "ErrorBad_PacketInvalid_CRCBuffer_OverflowUnknown_CommandCorruptionNot_Implemented"
-	_Response_t_name_4 = "MDB_BusyMDB_Invalid_CHKMDB_NAKMDB_TimeoutMDB_Invalid_EndMDB_Receive_OverflowMDB_Send_Overflow"
-	_Response_t_name_5 = "UART_Read_UnexpectedUART_Read_ErrorUART_Send_Busy"
+	_Response_t_name_3 = "Bad_PacketInvalid_CRCBuffer_OverflowUnknown_CommandNot_Implemented"
+	_Response_t_name_4 = "MDB_BusyMDB_Invalid_CHKMDB_NAKMDB_TimeoutMDB_Invalid_EndMDB_Receive_OverflowMDB_Send_OverflowMDB_Code_ErrorUART_Read_UnexpectedUART_Read_ErrorUART_Read_OverflowUART_Read_ParityUART_Send_Busy"
 )
 
 var (
 	_Response_t_index_1 = [...]uint8{0, 5, 8}
 	_Response_t_index_2 = [...]uint8{0, 11, 22}
-	_Response_t_index_3 = [...]uint8{0, 5, 15, 26, 41, 56, 66, 81}
-	_Response_t_index_4 = [...]uint8{0, 8, 23, 30, 41, 56, 76, 93}
-	_Response_t_index_5 = [...]uint8{0, 20, 35, 49}
+	_Response_t_index_3 = [...]uint8{0, 10, 21, 36, 51, 66}
+	_Response_t_index_4 = [...]uint8{0, 8, 23, 30, 41, 56, 76, 93, 107, 127, 142, 160, 176, 190}
 )
 
 func (i Response_t) String() string {
@@ -31,15 +29,12 @@ func (i Response_t) String() string {
 	case 8 <= i && i <= 9:
 		i -= 8
 		return _Response_t_name_2[_Response_t_index_2[i]:_Response_t_index_2[i+1]]
-	case 128 <= i && i <= 134:
-		i -= 128
+	case 129 <= i && i <= 133:
+		i -= 129
 		return _Response_t_name_3[_Response_t_index_3[i]:_Response_t_index_3[i+1]]
-	case 136 <= i && i <= 142:
+	case 136 <= i && i <= 148:
 		i -= 136
 		return _Response_t_name_4[_Response_t_index_4[i]:_Response_t_index_4[i+1]]
-	case 144 <= i && i <= 146:
-		i -= 144
-		return _Response_t_name_5[_Response_t_index_5[i]:_Response_t_index_5[i+1]]
 	default:
 		return "Response_t(" + strconv.FormatInt(int64(i), 10) + ")"
 	}
